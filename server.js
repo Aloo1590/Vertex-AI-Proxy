@@ -4,31 +4,20 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json({ limit: "4mb" }));
 
-const PORT       = process.env.PORT;
-const PROXY_KEY  = process.env.PROXY_KEY;
+const PORT       = process.env.PORT || 3000;
 const VERTEX_KEY = process.env.VERTEX_API_KEY;
 const PROJECT_ID = process.env.PROJECT_ID;
 const REGION     = process.env.REGION || "global";
 
 const VERTEX_URL = `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/${REGION}/endpoints/openapi/chat/completions`;
 
-function requireAuth(req, res, next) {
-  if (!PROXY_KEY) return next();
-  const auth  = req.headers["authorization"] || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : req.headers["x-api-key"] || "";
-  if (token !== PROXY_KEY) {
-    return res.status(401).json({ error: { message: "Unauthorized", type: "invalid_request_error" } });
-  }
-  next();
-}
-
 app.get("/", (_req, res) => res.json({ status: "ok" }));
 
-app.get("/v1/models", requireAuth, (_req, res) => {
+app.get("/v1/models", (_req, res) => {
   res.json({ object: "list", data: [] });
 });
 
-app.post("/v1/chat/completions", requireAuth, async (req, res) => {
+app.post("/v1/chat/completions", async (req, res) => {
   if (!VERTEX_KEY) return res.status(500).json({ error: { message: "VERTEX_API_KEY not set" } });
   if (!PROJECT_ID) return res.status(500).json({ error: { message: "PROJECT_ID not set" } });
 
@@ -73,4 +62,4 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
   res.json(json);
 });
 
-app.listen(PORT || 3000, () => console.log(`Proxy live on port ${PORT || 3000}`));
+app.listen(PORT, () => console.log(`Proxy live on port ${PORT}`));
