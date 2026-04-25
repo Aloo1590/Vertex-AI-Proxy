@@ -1,65 +1,102 @@
-import express from "express";
-import fetch from "node-fetch";
+const express = require("express");
+const cors = require("cors");
 
 const app = express();
-app.use(express.json({ limit: "4mb" }));
+const PORT = process.env.PORT || 3000;
 
-const PORT       = process.env.PORT || 3000;
-const VERTEX_KEY = process.env.VERTEX_API_KEY;
-const PROJECT_ID = process.env.PROJECT_ID;
-const REGION     = process.env.REGION || "global";
+app.use(cors());
+app.use(express.json({ limit: "20mb" }));
+
+const VERTEX_API_KEY = process.env.VERTEX_API_KEY;
+const PROJECT_ID     = process.env.PROJECT_ID;
+const REGION         = process.env.REGION || "global";
 
 const VERTEX_URL = `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/${REGION}/endpoints/openapi/chat/completions`;
 
-app.get("/", (_req, res) => res.json({ status: "ok" }));
+if (!VERTEX_API_KEY) console.warn("⚠️ VERTEX_API_KEY not set");
+if (!PROJECT_ID)     console.warn("⚠️ PROJECT_ID not set");
 
-app.get("/v1/models", (_req, res) => {
+/* ------------------ ROUTES ------------------ */
+
+app.get("/health", (_, res) => res.json({ ok: true }));
+app.get("/",       (_, res) => res.json({ ok: true }));
+
+app.get("/v1/models", (_, res) => {
   res.json({ object: "list", data: [] });
 });
 
+/* ------------------ MAIN ------------------ */
+
 app.post("/v1/chat/completions", async (req, res) => {
-  if (!VERTEX_KEY) return res.status(500).json({ error: { message: "VERTEX_API_KEY not set" } });
-  if (!PROJECT_ID) return res.status(500).json({ error: { message: "PROJECT_ID not set" } });
-
-  const stream = req.body.stream ?? false;
-  console.log(`[proxy] stream=${stream} model=${req.body.model} messages=${req.body.messages?.length}`);
-
-  let vertexRes;
   try {
-    vertexRes = await fetch(VERTEX_URL, {
+    if (!VERTEX_API_KEY) return res.status(401).json({ error: "Missing VERTEX_API_KEY" });
+    if (!PROJECT_ID)     return res.status(401).json({ error: "Missing PROJECT_ID" });
+
+    const body = req.body;
+
+    if (!body.messages || !Array.isArray(body.messages)) {
+      return res.status(400).json({ error: "messages required" });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+
+    const response = await fetch(VERTEX_URL, {
       method: "POST",
       headers: {
         "Content-Type":   "application/json",
-        "x-goog-api-key": VERTEX_KEY,
+        "x-goog-api-key": VERTEX_API_KEY,
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(body),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeout);
+
+    /* -------- STREAM -------- */
+
+    if (body.stream) {
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return res.status(response.status).json(err);
+      }
+
+      res.writeHead(200, {
+        "Content-Type":      "text/event-stream",
+        "Cache-Control":     "no-cache",
+        "Connection":        "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+
+      res.end();
+      return;
+    }
+
+    /* -------- NON STREAM -------- */
+
+    const data = await response.json();
+    res.status(response.status).json(data);
+
   } catch (err) {
-    console.error("[proxy] fetch error:", err.message);
-    return res.status(502).json({ error: { message: `Upstream fetch failed: ${err.message}` } });
+    if (err.name === "AbortError") {
+      return res.status(504).json({ error: "timeout" });
+    }
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
-
-  if (!vertexRes.ok) {
-    const errText = await vertexRes.text();
-    console.error(`[proxy] vertex error ${vertexRes.status}:`, errText);
-    return res.status(vertexRes.status).json({
-      error: { message: errText, type: "upstream_error", code: vertexRes.status },
-    });
-  }
-
-  if (stream) {
-    res.setHeader("Content-Type",      "text/event-stream");
-    res.setHeader("Cache-Control",     "no-cache");
-    res.setHeader("Connection",        "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    vertexRes.body.pipe(res);
-    vertexRes.body.on("error", (err) => { console.error("[proxy] stream error:", err.message); res.end(); });
-    req.on("close", () => vertexRes.body.destroy());
-    return;
-  }
-
-  const json = await vertexRes.json();
-  res.json(json);
 });
 
-app.listen(PORT, () => console.log(`Proxy live on port ${PORT}`));
+/* ------------------ FALLBACK ------------------ */
+
+app.all("*", (_, res) => res.status(404).json({ error: "Not found" }));
+
+app.listen(PORT, "0.0.0.0", () => console.log(`Proxy running on ${PORT}`));
