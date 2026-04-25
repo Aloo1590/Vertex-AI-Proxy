@@ -10,24 +10,37 @@ app.use(express.json({ limit: "20mb" }));
 const VERTEX_API_KEY = process.env.VERTEX_API_KEY;
 const PROJECT_ID     = process.env.PROJECT_ID;
 const REGION         = process.env.REGION || "global";
+const PROXY_KEY      = process.env.PROXY_KEY;
 
 const VERTEX_URL = `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT_ID}/locations/${REGION}/endpoints/openapi/chat/completions`;
 
 if (!VERTEX_API_KEY) console.warn("⚠️ VERTEX_API_KEY not set");
 if (!PROJECT_ID)     console.warn("⚠️ PROJECT_ID not set");
 
+/* ------------------ AUTH ------------------ */
+
+function requireAuth(req, res, next) {
+  if (!PROXY_KEY) return next();
+  const auth  = req.headers["authorization"] || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : req.headers["x-api-key"] || "";
+  if (token !== PROXY_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
 /* ------------------ ROUTES ------------------ */
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 app.get("/",       (_, res) => res.json({ ok: true }));
 
-app.get("/v1/models", (_, res) => {
+app.get("/v1/models", requireAuth, (_, res) => {
   res.json({ object: "list", data: [] });
 });
 
 /* ------------------ MAIN ------------------ */
 
-app.post("/v1/chat/completions", async (req, res) => {
+app.post("/v1/chat/completions", requireAuth, async (req, res) => {
   try {
     if (!VERTEX_API_KEY) return res.status(401).json({ error: "Missing VERTEX_API_KEY" });
     if (!PROJECT_ID)     return res.status(401).json({ error: "Missing PROJECT_ID" });
