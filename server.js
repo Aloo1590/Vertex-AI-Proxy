@@ -118,4 +118,4 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
 /* ── Fallback ── */
 app.all("*", (_, res) => res.status(404).json({ error: "Not found" }));
 
-app.listen(PORT, "0.0.0.0",
+app.listen(PORT, "0.0.0.0", () => console.log(`Proxy running on ${PORT}`));
