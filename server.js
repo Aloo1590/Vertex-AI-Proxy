@@ -18,12 +18,8 @@ if (!VERTEX_API_KEY) console.warn("⚠️  VERTEX_API_KEY not set");
 if (!PROJECT_ID)     console.warn("⚠️  PROJECT_ID not set");
 
 /* ── Process-level safety net ── */
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-});
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception:", err);
-});
+process.on("unhandledRejection", (reason) => console.error("Unhandled rejection:", reason));
+process.on("uncaughtException",  (err)    => console.error("Uncaught exception:", err));
 
 /* ── Auth ── */
 function requireAuth(req, res, next) {
@@ -72,6 +68,11 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
         return res.status(response.status).json(err);
       }
 
+      // Keep socket alive for long streams
+      req.socket.setTimeout(0);
+      req.socket.setNoDelay(true);
+      req.socket.setKeepAlive(true);
+
       res.writeHead(200, {
         "Content-Type":      "text/event-stream",
         "Cache-Control":     "no-cache",
@@ -82,7 +83,6 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
       const reader  = response.body.getReader();
       const decoder = new TextDecoder();
 
-      // Cancel upstream if client disconnects
       req.on("close", () => reader.cancel().catch(() => {}));
 
       try {
@@ -90,6 +90,7 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
           const { done, value } = await reader.read();
           if (done || res.writableEnded) break;
           res.write(decoder.decode(value, { stream: true }));
+          if (typeof res.flush === "function") res.flush();
         }
       } catch (streamErr) {
         if (streamErr.name !== "AbortError") {
