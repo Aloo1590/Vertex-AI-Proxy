@@ -68,11 +68,6 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
         return res.status(response.status).json(err);
       }
 
-      // Keep socket alive for long streams
-      req.socket.setTimeout(0);
-      req.socket.setNoDelay(true);
-      req.socket.setKeepAlive(true);
-
       res.writeHead(200, {
         "Content-Type":      "text/event-stream",
         "Cache-Control":     "no-cache",
@@ -83,23 +78,13 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
       const reader  = response.body.getReader();
       const decoder = new TextDecoder();
 
-      req.on("close", () => reader.cancel().catch(() => {}));
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || res.writableEnded) break;
-          res.write(decoder.decode(value, { stream: true }));
-          if (typeof res.flush === "function") res.flush();
-        }
-      } catch (streamErr) {
-        if (streamErr.name !== "AbortError") {
-          console.error("Stream error:", streamErr.message);
-        }
-      } finally {
-        if (!res.writableEnded) res.end();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
       }
 
+      res.end();
       return;
     }
 
