@@ -96,6 +96,8 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
       body.safety_settings = DEFAULT_SAFETY_SETTINGS;
     }
 
+    console.log(`[req] model=${body.model} stream=${!!body.stream} messages=${body.messages.length}`);
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120_000);
 
@@ -115,6 +117,7 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
     if (body.stream) {
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
+        console.error(`[vertex error] status=${response.status}`, JSON.stringify(err));
         return res.status(response.status).json(err);
       }
 
@@ -133,12 +136,29 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
       const reader  = response.body.getReader();
       const decoder = new TextDecoder();
       let receivedAnyContent = false;
+      let timedOut = false;
+
+      // Vertex can leave the stream open without ever sending more data or
+      // closing it (commonly happens when a safety check stalls internally).
+      // Without a watchdog, `await reader.read()` below just hangs forever
+      // and the client (JanitorAI) spins indefinitely. This races each read
+      // against an inactivity timer and bails out if nothing arrives in time.
+      const INACTIVITY_MS = 45_000;
+
+      function readWithTimeout() {
+        return Promise.race([
+          reader.read(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("STREAM_INACTIVE")), INACTIVITY_MS)
+          ),
+        ]);
+      }
 
       req.on("close", () => reader.cancel().catch(() => {}));
 
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readWithTimeout();
           if (done || res.writableEnded) break;
 
           const chunk = decoder.decode(value, { stream: true });
@@ -156,7 +176,11 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
           if (typeof res.flush === "function") res.flush();
         }
       } catch (streamErr) {
-        if (streamErr.name !== "AbortError") {
+        if (streamErr.message === "STREAM_INACTIVE") {
+          timedOut = true;
+          console.error(`[stream] no data for ${INACTIVITY_MS}ms — forcing close. model=${body.model}`);
+          reader.cancel().catch(() => {});
+        } else if (streamErr.name !== "AbortError") {
           console.error("Stream error:", streamErr.message);
         }
       } finally {
@@ -165,7 +189,19 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
           // (typically a silent safety block), surface that to the client
           // instead of letting it hang forever waiting for more data.
           if (!receivedAnyContent) {
-            res.write(`data: ${JSON.stringify(buildBlockedChunk())}\n\n`);
+            const fallback = timedOut
+              ? {
+                  id: "timeout",
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  choices: [{
+                    index: 0,
+                    delta: { content: "\n\n*[No response from Vertex — stream stalled and was closed]*" },
+                    finish_reason: "stop",
+                  }],
+                }
+              : buildBlockedChunk();
+            res.write(`data: ${JSON.stringify(fallback)}\n\n`);
           }
           // Always send the OpenAI-format terminator so clients relying on
           // it (JanitorAI included) know the response is actually done.
@@ -181,6 +217,7 @@ app.post("/v1/chat/completions", requireAuth, async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
+      console.error(`[vertex error] status=${response.status}`, JSON.stringify(data));
       return res.status(response.status).json(data);
     }
 
